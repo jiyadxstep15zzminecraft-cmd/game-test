@@ -1,0 +1,1235 @@
+```html
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MALAM TERAKHIR</title>
+
+<style>
+*{box-sizing:border-box}
+body{margin:0;overflow:hidden;background:#000;color:white;font-family:Arial,sans-serif}
+canvas{display:block}
+
+.screen{
+ position:fixed;inset:0;z-index:20;
+ background:rgba(0,0,0,.95);
+ display:flex;align-items:center;justify-content:center;
+ flex-direction:column;text-align:center;
+}
+h1{
+ color:#b90000;font-size:48px;letter-spacing:7px;
+ text-shadow:0 0 25px red;
+}
+button{
+ padding:14px 32px;background:#790000;color:white;
+ border:1px solid #ff4444;font-size:18px;
+ cursor:pointer;margin:10px;
+}
+button:hover{background:#b00000}
+
+#hud{
+ position:fixed;top:15px;left:15px;z-index:5;
+ font-size:15px;line-height:1.8;
+ text-shadow:0 2px 5px black;pointer-events:none;
+}
+#help{
+ position:fixed;bottom:15px;left:15px;z-index:5;
+ color:#ddd;font-size:13px;
+ text-shadow:0 2px 4px black;pointer-events:none;
+}
+#crosshair{
+ position:fixed;left:50%;top:50%;
+ width:5px;height:5px;border-radius:50%;
+ background:white;z-index:5;pointer-events:none;
+}
+#blood{
+ position:fixed;inset:0;z-index:6;pointer-events:none;
+ background:radial-gradient(transparent 35%,rgba(150,0,0,.8));
+ opacity:0;transition:opacity .2s;
+}
+#damageFlash{
+ position:fixed;inset:0;z-index:7;
+ pointer-events:none;
+ background:rgba(255,0,0,.48);
+ opacity:0;
+ transition:opacity .12s ease-out;
+}
+#minimap{
+ position:fixed;right:15px;top:15px;
+ width:170px;height:170px;
+ background:#080808;border:1px solid #777;z-index:5;
+}
+#message{
+ position:fixed;top:40%;width:100%;
+ text-align:center;font-size:22px;color:#ff5555;
+ text-shadow:0 0 12px red;pointer-events:none;z-index:8;
+}
+.hidden{display:none!important}
+</style>
+</head>
+
+<body>
+
+<div id="menu" class="screen">
+ <h1>MALAM TERAKHIR</h1>
+ <p>Temukan 3 catatan dan cari jalan keluar.</p>
+ <p>Jangan biarkan makhluk itu menemukanmu.</p>
+ <button id="start">MULAI BERMAIN</button>
+ <p>WASD: Bergerak | SHIFT: Lari | F: Senter</p>
+ <p>E: Interaksi / Sembunyi | Q: Medkit | ESC: Lepas mouse</p>
+</div>
+
+<div id="gameover" class="screen hidden">
+ <h1>GAME OVER</h1>
+ <p>Kegelapan telah menelanmu.</p>
+ <button onclick="location.reload()">ULANGI</button>
+</div>
+
+<div id="win" class="screen hidden">
+ <h1>SELAMAT!</h1>
+ <p>Kau berhasil keluar dari tempat itu.</p>
+ <button onclick="location.reload()">MAIN LAGI</button>
+</div>
+
+<div id="hud">
+ <div>❤️ Nyawa: <span id="health">100</span></div>
+ <div>📄 Catatan: <span id="notes">0</span>/3</div>
+ <div>💊 Medkit: <span id="medkits">1</span></div>
+ <div>🔦 Senter: <span id="battery">100</span>%</div>
+</div>
+
+<div id="help">
+ WASD bergerak · SHIFT berlari · F senter · E interaksi/sembunyi · Q medkit
+</div>
+
+<div id="crosshair"></div>
+<div id="blood"></div>
+<div id="damageFlash"></div>
+<div id="message"></div>
+<canvas id="minimap" width="170" height="170"></canvas>
+
+<script type="module">
+import * as THREE from
+"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+/* =================================
+   KONFIGURASI
+================================= */
+
+const SIZE=27;
+const CELL=4;
+
+let scene,camera,renderer,clock;
+let player,monster,flashlight,exitDoor;
+
+let health=100;
+let notes=0;
+let medkits=1;
+let battery=100;
+
+let flashlightOn=true;
+let hidden=false;
+let gameStarted=false;
+let gameEnded=false;
+let monsterAngry=false;
+
+let yaw=-Math.PI/4;
+let pitch=0;
+
+let lastDamage=0;
+let lastMonsterPath=0;
+let lastFootstep=0;
+let lastMinimap=0;
+let lastGrowl=0;
+
+let runningTimer=null;
+let maze=[];
+let walls=[];
+let items=[];
+let beds=[];
+let monsterPath=[];
+
+const keys={};
+
+const ui={
+ health:document.getElementById("health"),
+ notes:document.getElementById("notes"),
+ medkits:document.getElementById("medkits"),
+ battery:document.getElementById("battery"),
+ blood:document.getElementById("blood"),
+ damageFlash:document.getElementById("damageFlash"),
+ message:document.getElementById("message")
+};
+
+let audioCtx=null;
+let masterGain=null;
+let messageTimer=null;
+let damageFlashTimer=null;
+
+/* =================================
+   AUDIO
+================================= */
+
+function initAudio(){
+ if(audioCtx){
+  if(audioCtx.state==="suspended")audioCtx.resume();
+  return;
+ }
+
+ audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+
+ masterGain=audioCtx.createGain();
+ masterGain.gain.value=.8;
+ masterGain.connect(audioCtx.destination);
+
+ const ambient=audioCtx.createOscillator();
+ const ambientGain=audioCtx.createGain();
+
+ ambient.type="sine";
+ ambient.frequency.value=42;
+ ambientGain.gain.value=.045;
+
+ ambient.connect(ambientGain);
+ ambientGain.connect(masterGain);
+ ambient.start();
+
+ const second=audioCtx.createOscillator();
+ const secondGain=audioCtx.createGain();
+
+ second.type="triangle";
+ second.frequency.value=57;
+ secondGain.gain.value=.018;
+
+ second.connect(secondGain);
+ secondGain.connect(masterGain);
+ second.start();
+}
+
+function tone(freq,duration,type="sine",volume=.1,endFreq=null){
+ if(!audioCtx)return;
+
+ const osc=audioCtx.createOscillator();
+ const gain=audioCtx.createGain();
+ const now=audioCtx.currentTime;
+
+ osc.type=type;
+ osc.frequency.setValueAtTime(freq,now);
+
+ if(endFreq!==null){
+  osc.frequency.exponentialRampToValueAtTime(
+   Math.max(1,endFreq),now+duration
+  );
+ }
+
+ gain.gain.setValueAtTime(volume,now);
+ gain.gain.exponentialRampToValueAtTime(.001,now+duration);
+
+ osc.connect(gain);
+ gain.connect(masterGain);
+
+ osc.start(now);
+ osc.stop(now+duration);
+}
+
+function noise(duration,volume=.1,filterFreq=500){
+ if(!audioCtx)return;
+
+ const length=Math.floor(audioCtx.sampleRate*duration);
+ const buffer=audioCtx.createBuffer(
+  1,length,audioCtx.sampleRate
+ );
+
+ const data=buffer.getChannelData(0);
+
+ for(let i=0;i<length;i++){
+  data[i]=(Math.random()*2-1)*
+   Math.pow(1-i/length,1.5);
+ }
+
+ const source=audioCtx.createBufferSource();
+ const filter=audioCtx.createBiquadFilter();
+ const gain=audioCtx.createGain();
+
+ source.buffer=buffer;
+ filter.type="lowpass";
+ filter.frequency.value=filterFreq;
+ gain.gain.value=volume;
+
+ source.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+ source.start();
+}
+
+function playFootstep(running){
+ if(!audioCtx)return;
+
+ if(audioCtx.state==="suspended")audioCtx.resume();
+
+ if(running){
+  noise(.16,.34,750);
+  tone(100,.13,"triangle",.22,38);
+  tone(52,.12,"sine",.2,25);
+  noise(.07,.12,1800);
+ }else{
+  noise(.1,.105,380);
+  tone(72,.085,"triangle",.075,35);
+ }
+}
+
+function startRunningSound(){
+ if(runningTimer)return;
+
+ runningTimer=setInterval(()=>{
+  if(!gameStarted||gameEnded||hidden)return;
+
+  const moving=
+   keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD;
+
+  const running=
+   keys.ShiftLeft||keys.ShiftRight;
+
+  if(moving&&running)playFootstep(true);
+ },250);
+}
+
+function stopRunningSound(){
+ if(runningTimer){
+  clearInterval(runningTimer);
+  runningTimer=null;
+ }
+}
+
+function playGrowl(){
+ noise(.7,.48,280);
+ tone(75,.8,"sawtooth",.25,28);
+ tone(43,.65,"sine",.25,20);
+}
+
+function playPickup(){
+ tone(520,.12,"sine",.14,780);
+ tone(780,.2,"sine",.1,1050);
+}
+
+function playFlashlight(){
+ tone(160,.08,"square",.07,90);
+}
+
+function playDamage(){
+ noise(.35,.4,500);
+ tone(90,.3,"sawtooth",.25,35);
+ tone(48,.25,"sine",.2,20);
+}
+
+/* =================================
+   MAZE
+================================= */
+
+function generateMaze(){
+ for(let z=0;z<SIZE;z++){
+  maze[z]=[];
+
+  for(let x=0;x<SIZE;x++){
+   maze[z][x]=
+    (x===0||z===0||x===SIZE-1||z===SIZE-1)
+    ?1:0;
+  }
+ }
+
+ for(let z=2;z<SIZE-2;z+=2){
+  for(let x=2;x<SIZE-2;x+=2){
+   if(Math.random()<.65){
+    maze[z][x]=1;
+
+    const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+    const d=dirs[Math.floor(Math.random()*4)];
+
+    if(Math.random()<.75){
+     maze[z+d[1]][x+d[0]]=1;
+    }
+   }
+  }
+ }
+
+ for(let z=1;z<8;z++){
+  for(let x=1;x<8;x++)maze[z][x]=0;
+ }
+
+ for(let x=1;x<SIZE-1;x++)maze[1][x]=0;
+ for(let z=1;z<SIZE-1;z++)maze[z][SIZE-2]=0;
+}
+
+function gridToWorld(x,z){
+ return new THREE.Vector3(
+  (x-(SIZE-1)/2)*CELL,
+  0,
+  (z-(SIZE-1)/2)*CELL
+ );
+}
+
+function worldToGrid(x,z){
+ return {
+  x:Math.round(x/CELL+(SIZE-1)/2),
+  z:Math.round(z/CELL+(SIZE-1)/2)
+ };
+}
+
+function isWall(x,z){
+ const g=worldToGrid(x,z);
+
+ if(g.x<0||g.z<0||g.x>=SIZE||g.z>=SIZE)return true;
+
+ return maze[g.z][g.x]===1;
+}
+
+function randomOpenCell(minDistance=0){
+ for(let i=0;i<3000;i++){
+  const x=1+Math.floor(Math.random()*(SIZE-2));
+  const z=1+Math.floor(Math.random()*(SIZE-2));
+
+  if(maze[z][x]!==0)continue;
+
+  const p=gridToWorld(x,z);
+
+  if(player&&p.distanceTo(player.position)<minDistance)continue;
+
+  return {x,z,p};
+ }
+
+ return {
+  x:SIZE-2,
+  z:SIZE-2,
+  p:gridToWorld(SIZE-2,SIZE-2)
+ };
+}
+
+/* =================================
+   WORLD
+================================= */
+
+function createWorld(){
+ scene=new THREE.Scene();
+ scene.background=new THREE.Color(0x030405);
+ scene.fog=new THREE.FogExp2(0x08090b,.018);
+
+ camera=new THREE.PerspectiveCamera(
+  100,innerWidth/innerHeight,.1,150
+ );
+
+ const spawn=gridToWorld(3,3);
+ camera.position.set(spawn.x,1.65,spawn.z);
+ camera.rotation.order="YXZ";
+ camera.rotation.set(0,yaw,0);
+
+ renderer=new THREE.WebGLRenderer({antialias:true});
+ renderer.setSize(innerWidth,innerHeight);
+ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+ renderer.shadowMap.enabled=true;
+ renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+ renderer.toneMapping=THREE.ACESFilmicToneMapping;
+ renderer.toneMappingExposure=1.15;
+
+ document.body.appendChild(renderer.domElement);
+
+ scene.add(new THREE.AmbientLight(0x9a9a9a,.392));
+ scene.add(new THREE.HemisphereLight(0xb8c7d8,0x252020,.30));
+
+ const floor=new THREE.Mesh(
+  new THREE.PlaneGeometry(SIZE*CELL,SIZE*CELL),
+  new THREE.MeshStandardMaterial({color:0x292929,roughness:.95})
+ );
+
+ floor.rotation.x=-Math.PI/2;
+ scene.add(floor);
+
+ const ceiling=new THREE.Mesh(
+  new THREE.PlaneGeometry(SIZE*CELL,SIZE*CELL),
+  new THREE.MeshStandardMaterial({color:0x151515})
+ );
+
+ ceiling.rotation.x=Math.PI/2;
+ ceiling.position.y=3.4;
+ scene.add(ceiling);
+
+ const wallGeo=new THREE.BoxGeometry(CELL,3.4,CELL);
+ const wallMat=new THREE.MeshStandardMaterial({color:0x343333,roughness:.9});
+
+ for(let z=0;z<SIZE;z++){
+  for(let x=0;x<SIZE;x++){
+   if(maze[z][x]!==1)continue;
+
+   const p=gridToWorld(x,z);
+   const wall=new THREE.Mesh(wallGeo,wallMat);
+
+   wall.position.set(p.x,1.7,p.z);
+   wall.castShadow=true;
+   wall.receiveShadow=true;
+
+   scene.add(wall);
+   walls.push(wall);
+  }
+ }
+
+ for(let z=1;z<SIZE-1;z++){
+  for(let x=1;x<SIZE-1;x++){
+   if(maze[z][x]!==0)continue;
+
+   if(x%2===0&&z%2===0&&Math.random()<.45){
+    const p=gridToWorld(x,z);
+    const lamp=new THREE.PointLight(0xffd6a0,1.1,10);
+
+    lamp.position.set(p.x,3,p.z);
+    scene.add(lamp);
+
+    const bulb=new THREE.Mesh(
+     new THREE.BoxGeometry(.35,.08,.35),
+     new THREE.MeshBasicMaterial({color:0xffd6a0})
+    );
+
+    bulb.position.copy(lamp.position);
+    scene.add(bulb);
+   }
+  }
+ }
+
+ flashlight=new THREE.SpotLight(
+  0xfff0d0,111.6,43.4,Math.PI/4.5,.35,1.2
+ );
+
+ flashlight.position.set(0,0,0);
+ flashlight.target.position.set(0,0,-1);
+
+ camera.add(flashlight);
+ camera.add(flashlight.target);
+ scene.add(camera);
+
+ player={position:camera.position};
+
+ createFurniture();
+ createExit();
+ createMonster();
+ createItems();
+}
+
+/* =================================
+   FURNITURE
+================================= */
+
+function createFurniture(){
+ const bedMat=new THREE.MeshStandardMaterial({color:0x4a2525});
+ const woodMat=new THREE.MeshStandardMaterial({color:0x49372b});
+
+ for(let i=0;i<9;i++){
+  const cell=randomOpenCell(12);
+  const p=cell.p;
+  const bed=new THREE.Group();
+
+  const base=new THREE.Mesh(
+   new THREE.BoxGeometry(2.2,.35,3),woodMat
+  );
+
+  base.position.y=.35;
+  bed.add(base);
+
+  const mattress=new THREE.Mesh(
+   new THREE.BoxGeometry(2.1,.25,2.8),bedMat
+  );
+
+  mattress.position.y=.65;
+  bed.add(mattress);
+
+  const pillow=new THREE.Mesh(
+   new THREE.BoxGeometry(1,.2,.6),
+   new THREE.MeshStandardMaterial({color:0xaaa49a})
+  );
+
+  pillow.position.set(0,.85,-.9);
+  bed.add(pillow);
+
+  bed.position.set(p.x,0,p.z);
+  scene.add(bed);
+  beds.push(bed);
+
+  if(i%2===0){
+   const desk=new THREE.Mesh(
+    new THREE.BoxGeometry(2,.9,1),woodMat
+   );
+
+   desk.position.set(p.x+2.4,.45,p.z);
+   scene.add(desk);
+  }
+ }
+}
+
+/* =================================
+   EXIT
+================================= */
+
+function createExit(){
+ const p=gridToWorld(SIZE-2,SIZE-2);
+
+ exitDoor=new THREE.Group();
+
+ const frame=new THREE.Mesh(
+  new THREE.BoxGeometry(3,3.3,.35),
+  new THREE.MeshStandardMaterial({color:0x55504a})
+ );
+
+ frame.position.y=1.6;
+ exitDoor.add(frame);
+
+ const door=new THREE.Mesh(
+  new THREE.BoxGeometry(2.5,3,.25),
+  new THREE.MeshStandardMaterial({color:0x321010})
+ );
+
+ door.position.set(0,1.5,-.2);
+ exitDoor.add(door);
+
+ exitDoor.position.set(p.x,0,p.z);
+ scene.add(exitDoor);
+}
+
+/* =================================
+   ITEMS
+================================= */
+
+function createItems(){
+ for(const type of ["note","note","note","medkit","medkit"]){
+  spawnItem(type);
+ }
+}
+
+function spawnItem(type){
+ const cell=randomOpenCell(10);
+ const color=type==="note"?0xe5d5a0:0x32bb62;
+
+ const mesh=new THREE.Mesh(
+  new THREE.BoxGeometry(.55,.55,.55),
+  new THREE.MeshStandardMaterial({
+   color,
+   emissive:color,
+   emissiveIntensity:.35
+  })
+ );
+
+ mesh.position.set(cell.p.x,.8,cell.p.z);
+ scene.add(mesh);
+ items.push({mesh,type});
+}
+
+/* =================================
+   MONSTER
+================================= */
+
+function createMonster(){
+ monster=new THREE.Group();
+
+ const dark=new THREE.MeshStandardMaterial({color:0x090909,roughness:1});
+ const red=new THREE.MeshStandardMaterial({color:0x990000,emissive:0x550000});
+
+ const body=new THREE.Mesh(
+  new THREE.BoxGeometry(.8,1.5,.45),dark
+ );
+
+ body.position.y=1.2;
+ monster.add(body);
+
+ const head=new THREE.Mesh(
+  new THREE.SphereGeometry(.38,12,12),dark
+ );
+
+ head.position.y=2.15;
+ monster.add(head);
+
+ for(const x of [-.16,.16]){
+  const eye=new THREE.Mesh(
+   new THREE.SphereGeometry(.055,8,8),red
+  );
+
+  eye.position.set(x,2.2,-.34);
+  monster.add(eye);
+ }
+
+ for(const x of [-.25,.25]){
+  const leg=new THREE.Mesh(
+   new THREE.BoxGeometry(.22,.9,.25),dark
+  );
+
+  leg.position.set(x,.45,0);
+  monster.add(leg);
+ }
+
+ const cell=randomOpenCell(35);
+ monster.position.set(cell.p.x,0,cell.p.z);
+ scene.add(monster);
+}
+
+/* =================================
+   MOVEMENT
+================================= */
+
+function canMoveTo(x,z){
+ const r=.45;
+
+ return (
+  !isWall(x+r,z+r)&&
+  !isWall(x-r,z+r)&&
+  !isWall(x+r,z-r)&&
+  !isWall(x-r,z-r)
+ );
+}
+
+function movePlayer(dt){
+ if(hidden||gameEnded)return;
+
+ const forward=new THREE.Vector3(
+  -Math.sin(yaw),0,-Math.cos(yaw)
+ );
+
+ const right=new THREE.Vector3(
+  Math.cos(yaw),0,-Math.sin(yaw)
+ );
+
+ const direction=new THREE.Vector3();
+
+ if(keys.KeyW)direction.add(forward);
+ if(keys.KeyS)direction.sub(forward);
+ if(keys.KeyD)direction.add(right);
+ if(keys.KeyA)direction.sub(right);
+
+ if(direction.lengthSq()===0)return;
+
+ direction.normalize();
+
+ const running=keys.ShiftLeft||keys.ShiftRight;
+ const speed=running?8.2:4.1;
+
+ const nextX=camera.position.x+direction.x*speed*dt;
+ const nextZ=camera.position.z+direction.z*speed*dt;
+
+ if(canMoveTo(nextX,camera.position.z)){
+  camera.position.x=nextX;
+ }
+
+ if(canMoveTo(camera.position.x,nextZ)){
+  camera.position.z=nextZ;
+ }
+
+ if(!running&&performance.now()-lastFootstep>430){
+  playFootstep(false);
+  lastFootstep=performance.now();
+ }
+}
+
+/* =================================
+   MONSTER PATHFINDING
+================================= */
+
+function findPath(){
+ const pg=worldToGrid(camera.position.x,camera.position.z);
+ const mg=worldToGrid(monster.position.x,monster.position.z);
+
+ const sx=pg.x,sz=pg.z;
+ const ex=mg.x,ez=mg.z;
+
+ if(sx<0||sz<0||ex<0||ez<0||
+ sx>=SIZE||sz>=SIZE||ex>=SIZE||ez>=SIZE)return;
+
+ const total=SIZE*SIZE;
+ const queue=new Int32Array(total);
+ const parent=new Int32Array(total);
+
+ parent.fill(-1);
+
+ const start=ez*SIZE+ex;
+ const goal=sz*SIZE+sx;
+
+ let head=0,tail=0;
+
+ queue[tail++]=start;
+ parent[start]=start;
+
+ const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+
+ while(head<tail){
+  const current=queue[head++];
+
+  if(current===goal)break;
+
+  const x=current%SIZE;
+  const z=Math.floor(current/SIZE);
+
+  for(const [dx,dz] of dirs){
+   const nx=x+dx,nz=z+dz;
+
+   if(nx<0||nz<0||nx>=SIZE||nz>=SIZE)continue;
+   if(maze[nz][nx]===1)continue;
+
+   const next=nz*SIZE+nx;
+
+   if(parent[next]!==-1)continue;
+
+   parent[next]=current;
+   queue[tail++]=next;
+  }
+ }
+
+ monsterPath=[];
+
+ if(parent[goal]===-1)return;
+
+ let node=goal;
+
+ while(node!==start){
+  monsterPath.push(
+   gridToWorld(node%SIZE,Math.floor(node/SIZE))
+  );
+
+  node=parent[node];
+ }
+
+ monsterPath.reverse();
+}
+
+/* =================================
+   EFEK SERANGAN MONSTER
+================================= */
+
+function showDamageFlash(){
+ // Efek merah memenuhi layar sebentar.
+ ui.damageFlash.style.transition="none";
+ ui.damageFlash.style.opacity="1";
+
+ // Paksa browser menerapkan opacity sebelum fade.
+ void ui.damageFlash.offsetWidth;
+
+ ui.damageFlash.style.transition="opacity .45s ease-out";
+ ui.damageFlash.style.opacity="0";
+
+ clearTimeout(damageFlashTimer);
+
+ damageFlashTimer=setTimeout(()=>{
+  ui.damageFlash.style.opacity="0";
+ },500);
+
+ // Efek darah di tepi layar tetap aktif.
+ ui.blood.style.opacity=".9";
+
+ setTimeout(()=>{
+  ui.blood.style.opacity="0";
+ },400);
+}
+
+function updateMonster(dt){
+ if(gameEnded||hidden)return;
+
+ const distance=monster.position.distanceTo(camera.position);
+
+ if(performance.now()-lastMonsterPath>450){
+  findPath();
+  lastMonsterPath=performance.now();
+ }
+
+ if(distance<18&&!monsterAngry){
+  monsterAngry=true;
+  playGrowl();
+  showMessage("DIA MENEMUKANMU...");
+ }
+
+ if(distance>23){
+  monsterAngry=false;
+ }
+
+ const speed=monsterAngry?4.2:2.0;
+
+ if(monsterPath.length){
+  const target=monsterPath[0];
+
+  const dx=target.x-monster.position.x;
+  const dz=target.z-monster.position.z;
+  const len=Math.hypot(dx,dz);
+
+  if(len<.35){
+   monsterPath.shift();
+  }else{
+   monster.position.x+=dx/len*speed*dt;
+   monster.position.z+=dz/len*speed*dt;
+  }
+ }
+
+ monster.lookAt(
+  camera.position.x,
+  monster.position.y,
+  camera.position.z
+ );
+
+ // Jarak serangan diperbesar agar monster tidak gagal memberi damage.
+ // Pemeriksaan memakai jarak horizontal, bukan jarak 3D.
+ const dx=monster.position.x-camera.position.x;
+ const dz=monster.position.z-camera.position.z;
+ const attackDistance=Math.hypot(dx,dz);
+
+ if(attackDistance<2.25){
+  monsterAttack();
+ }
+}
+
+function monsterAttack(){
+ if(gameEnded||hidden)return;
+
+ const now=performance.now();
+
+ // Cooldown satu detik antarserangan.
+ if(now-lastDamage<1000)return;
+
+ lastDamage=now;
+
+ health=Math.max(0,health-25);
+
+ // Efek visual merah, darah, dan suara.
+ showDamageFlash();
+ playDamage();
+
+ updateHUD();
+
+ showMessage("MONSTER MENYERANGMU!");
+
+ if(health<=0){
+  gameEnded=true;
+  stopRunningSound();
+
+  document.exitPointerLock?.();
+
+  document.getElementById("gameover")
+   .classList.remove("hidden");
+ }
+}
+
+/* =================================
+   INTERACTION
+================================= */
+
+function showMessage(text){
+ ui.message.textContent=text;
+
+ clearTimeout(messageTimer);
+
+ messageTimer=setTimeout(()=>{
+  ui.message.textContent="";
+ },2200);
+}
+
+function interact(){
+ if(gameEnded)return;
+
+ if(camera.position.distanceTo(exitDoor.position)<3){
+  if(notes>=3){
+   winGame();
+  }else{
+   showMessage("KAMU MEMBUTUHKAN 3 CATATAN!");
+  }
+  return;
+ }
+
+ if(hidden){
+  hidden=false;
+  camera.position.y=1.65;
+  showMessage("KAMU KELUAR DARI TEMPAT PERSEMBUNYIAN");
+  return;
+ }
+
+ let nearestBed=null;
+ let nearestDistance=Infinity;
+
+ for(const bed of beds){
+  const d=camera.position.distanceTo(bed.position);
+
+  if(d<3&&d<nearestDistance){
+   nearestDistance=d;
+   nearestBed=bed;
+  }
+ }
+
+ if(nearestBed){
+  hidden=true;
+  camera.position.y=.8;
+  showMessage("KAMU BERSEMBUNYI...");
+  return;
+ }
+
+ for(let i=items.length-1;i>=0;i--){
+  const item=items[i];
+
+  if(camera.position.distanceTo(item.mesh.position)<2.2){
+   if(item.type==="note"){
+    notes++;
+    showMessage("CATATAN DITEMUKAN!");
+   }else{
+    medkits++;
+    showMessage("MEDKIT DITEMUKAN!");
+   }
+
+   scene.remove(item.mesh);
+   items.splice(i,1);
+
+   playPickup();
+   updateHUD();
+   return;
+  }
+ }
+
+ showMessage("TIDAK ADA YANG BISA DIGUNAKAN");
+}
+
+function useMedkit(){
+ if(medkits<=0||health>=100)return;
+
+ medkits--;
+ health=Math.min(100,health+45);
+
+ updateHUD();
+ showMessage("MEDKIT DIGUNAKAN");
+
+ tone(350,.25,"sine",.1,650);
+}
+
+function takeDamage(amount){
+ health=Math.max(0,health-amount);
+ showDamageFlash();
+ playDamage();
+ updateHUD();
+
+ if(health<=0){
+  gameEnded=true;
+  stopRunningSound();
+
+  document.exitPointerLock?.();
+
+  document.getElementById("gameover")
+   .classList.remove("hidden");
+ }
+}
+
+function updateHUD(){
+ ui.health.textContent=health;
+ ui.notes.textContent=notes;
+ ui.medkits.textContent=medkits;
+ ui.battery.textContent=Math.floor(battery);
+}
+
+function winGame(){
+ gameEnded=true;
+ stopRunningSound();
+
+ document.exitPointerLock?.();
+
+ document.getElementById("win")
+  .classList.remove("hidden");
+}
+
+/* =================================
+   MINIMAP
+================================= */
+
+const mapCanvas=document.getElementById("minimap");
+const mapCtx=mapCanvas.getContext("2d");
+
+function drawMinimap(){
+ const s=170/SIZE;
+
+ mapCtx.fillStyle="#080808";
+ mapCtx.fillRect(0,0,170,170);
+
+ for(let z=0;z<SIZE;z++){
+  for(let x=0;x<SIZE;x++){
+   if(maze[z][x]===1){
+    mapCtx.fillStyle="#666";
+    mapCtx.fillRect(x*s,z*s,s,s);
+   }
+  }
+ }
+
+ for(const item of items){
+  const g=worldToGrid(
+   item.mesh.position.x,item.mesh.position.z
+  );
+
+  mapCtx.fillStyle=item.type==="note"?"#ffff66":"#00ff77";
+  mapCtx.fillRect(g.x*s+2,g.z*s+2,4,4);
+ }
+
+ const p=worldToGrid(
+  camera.position.x,camera.position.z
+ );
+
+ mapCtx.fillStyle="#36aaff";
+ mapCtx.beginPath();
+ mapCtx.arc((p.x+.5)*s,(p.z+.5)*s,4,0,Math.PI*2);
+ mapCtx.fill();
+
+ const m=worldToGrid(
+  monster.position.x,monster.position.z
+ );
+
+ mapCtx.fillStyle="#ff2222";
+ mapCtx.beginPath();
+ mapCtx.arc((m.x+.5)*s,(m.z+.5)*s,4,0,Math.PI*2);
+ mapCtx.fill();
+}
+
+/* =================================
+   INPUT
+================================= */
+
+document.addEventListener("keydown",e=>{
+ keys[e.code]=true;
+
+ if(["KeyW","KeyA","KeyS","KeyD","Space"].includes(e.code)){
+  e.preventDefault();
+ }
+
+ if(e.repeat)return;
+
+ if(e.code==="KeyF"){
+  flashlightOn=!flashlightOn;
+  flashlight.visible=flashlightOn;
+  playFlashlight();
+ }
+
+ if(e.code==="KeyE")interact();
+ if(e.code==="KeyQ")useMedkit();
+});
+
+document.addEventListener("keyup",e=>{
+ keys[e.code]=false;
+});
+
+document.addEventListener("mousemove",e=>{
+ if(document.pointerLockElement!==renderer?.domElement)return;
+
+ yaw-=e.movementX*.002;
+ pitch-=e.movementY*.002;
+
+ pitch=Math.max(-1.45,Math.min(1.45,pitch));
+
+ camera.rotation.order="YXZ";
+ camera.rotation.y=yaw;
+ camera.rotation.x=pitch;
+});
+
+document.addEventListener("pointerlockchange",()=>{
+ if(document.pointerLockElement!==renderer?.domElement){
+  for(const key in keys)keys[key]=false;
+ }
+});
+
+/* =================================
+   START
+================================= */
+
+document.getElementById("start").addEventListener("click",async()=>{
+ if(gameStarted)return;
+
+ initAudio();
+
+ if(audioCtx?.state==="suspended"){
+  await audioCtx.resume();
+ }
+
+ gameStarted=true;
+ clock.start();
+
+ document.getElementById("menu").classList.add("hidden");
+
+ startRunningSound();
+
+ try{
+  await renderer.domElement.requestPointerLock();
+ }catch(error){
+  showMessage("KLIK LAYAR UNTUK MENGAKTIFKAN MOUSE");
+ }
+});
+
+/* =================================
+   BATTERY
+================================= */
+
+function updateBattery(dt){
+ if(!flashlightOn)return;
+
+ battery=Math.max(0,battery-dt*.45);
+
+ if(battery<=0){
+  flashlightOn=false;
+  flashlight.visible=false;
+  showMessage("BATERAI SENTER HABIS");
+ }
+
+ updateHUD();
+}
+
+/* =================================
+   GAME LOOP
+================================= */
+
+function animate(){
+ requestAnimationFrame(animate);
+
+ if(!renderer||!clock)return;
+
+ const dt=Math.min(clock.getDelta(),.05);
+
+ if(gameStarted&&!gameEnded){
+  movePlayer(dt);
+  updateMonster(dt);
+  updateBattery(dt);
+
+  for(const item of items){
+   item.mesh.rotation.y+=dt*.8;
+
+   item.mesh.position.y=
+    .8+Math.sin(
+     performance.now()*.002+item.mesh.position.x
+    )*.08;
+  }
+
+  if(performance.now()-lastMinimap>90){
+   drawMinimap();
+   lastMinimap=performance.now();
+  }
+ }
+
+ renderer.render(scene,camera);
+}
+
+/* =================================
+   INITIALIZATION
+================================= */
+
+function init(){
+ generateMaze();
+ createWorld();
+
+ clock=new THREE.Clock(false);
+
+ drawMinimap();
+ animate();
+}
+
+window.addEventListener("resize",()=>{
+ if(!camera||!renderer)return;
+
+ camera.aspect=innerWidth/innerHeight;
+ camera.updateProjectionMatrix();
+
+ renderer.setSize(innerWidth,innerHeight);
+});
+
+init();
+
+</script>
+</body>
+</html>
+```
